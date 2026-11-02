@@ -1,4 +1,7 @@
-FROM php:8.2-apache
+FROM php:8.4-apache
+
+# Set environment variables
+ENV COMPOSER_ALLOW_SUPERUSER=1
 
 # Install system dependencies & PostgreSQL development libraries
 RUN apt-get update && apt-get install -y \
@@ -40,4 +43,5 @@ RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cac
 EXPOSE 80
 
 ENTRYPOINT ["docker/entrypoint.sh"]
+
 
