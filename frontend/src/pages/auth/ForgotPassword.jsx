@@ -21,10 +21,8 @@ export default function ForgotPassword() {
       setSent(true);
       toast.success('Reset link sent — check your inbox');
     } catch (error) {
-      // Always show a neutral message so we never reveal whether an email exists.
-      setSent(true);
-      toast.success('If that email exists, a reset link is on its way');
-      console.warn(getErrorMessage(error));
+      toast.error(getErrorMessage(error) || 'Failed to send reset link');
+      console.error(error);
     } finally {
       setLoading(false);
     }
@@ -48,11 +46,7 @@ export default function ForgotPassword() {
           <MailCheck className="mx-auto text-emerald-600 dark:text-emerald-400" size={28} />
           <h2 className="mt-3 font-semibold text-emerald-800 dark:text-emerald-300">Check your email</h2>
           <p className="mt-1 text-sm text-emerald-700/80 dark:text-emerald-400/80">
-            We sent a password reset link to <strong>{email}</strong>.
-          </p>
-          <p className="mt-3 text-xs text-emerald-700/70 dark:text-emerald-400/70">
-            Local dev tip: emails are written to <code>backend/storage/logs/laravel.log</code> because the
-            mailer is set to <code>log</code>.
+            We sent a password reset link to <strong>{email}</strong>. Please check your inbox and spam folder.
           </p>
         </div>
       ) : (
