@@ -3,13 +3,14 @@
 namespace App\Mail;
 
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Symfony\Component\Mailer\SentMessage;
 use Symfony\Component\Mailer\Transport\AbstractTransport;
 use Symfony\Component\Mime\MessageConverter;
 
 class ResendHttpTransport extends AbstractTransport
 {
-    public function __construct(protected string $apiKey)
+    public function __construct(protected ?string $apiKey = null)
     {
         parent::__construct();
     }
@@ -18,32 +19,95 @@ class ResendHttpTransport extends AbstractTransport
     {
         $email = MessageConverter::toEmail($message->getOriginalMessage());
 
+        // Determine "From" address safely
+        $from = null;
+        $fromAddresses = $email->getFrom();
+        if (!empty($fromAddresses)) {
+            $fromObj = $fromAddresses[0];
+            $name = $fromObj->getName();
+            $addr = $fromObj->getAddress();
+            $from = !empty($name) ? "{$name} <{$addr}>" : $addr;
+        } else {
+            $configFromAddr = config('mail.from.address', 'onboarding@resend.dev');
+            $configFromName = config('mail.from.name', 'NexClient');
+            $from = !empty($configFromName) ? "{$configFromName} <{$configFromAddr}>" : $configFromAddr;
+        }
+
+        // Determine "To" recipients
+        $to = [];
+        foreach ($email->getTo() as $address) {
+            $to[] = $address->getAddress();
+        }
+
+        if (empty($to)) {
+            throw new \RuntimeException('No recipient email address specified.');
+        }
+
+        // Extract Subject
+        $subject = $email->getSubject() ?? 'Password Reset';
+
+        // Extract HTML body (handling stream resources if any)
+        $htmlBody = $email->getHtmlBody();
+        if (is_resource($htmlBody)) {
+            $htmlBody = stream_get_contents($htmlBody);
+        }
+
+        // Extract Text body (handling stream resources if any)
+        $textBody = $email->getTextBody();
+        if (is_resource($textBody)) {
+            $textBody = stream_get_contents($textBody);
+        }
+
         $payload = [
-            'from' => $email->getFrom()[0]->toString(),
-            'to' => array_map(fn($addr) => $addr->getAddress(), $email->getTo()),
-            'subject' => $email->getSubject(),
-            'html' => $email->getHtmlBody(),
-            'text' => $email->getTextBody(),
+            'from' => $from,
+            'to' => $to,
+            'subject' => $subject,
         ];
 
-        if (!empty($email->getReplyTo())) {
-            $payload['reply_to'] = array_map(fn($addr) => $addr->getAddress(), $email->getReplyTo());
+        if (!empty($htmlBody)) {
+            $payload['html'] = $htmlBody;
+        }
+        if (!empty($textBody)) {
+            $payload['text'] = $textBody;
         }
 
-        if (!empty($email->getCc())) {
-            $payload['cc'] = array_map(fn($addr) => $addr->getAddress(), $email->getCc());
+        // Reply-To
+        $replyTo = [];
+        foreach ($email->getReplyTo() as $address) {
+            $replyTo[] = $address->getAddress();
+        }
+        if (!empty($replyTo)) {
+            $payload['reply_to'] = $replyTo;
         }
 
-        if (!empty($email->getBcc())) {
-            $payload['bcc'] = array_map(fn($addr) => $addr->getAddress(), $email->getBcc());
+        // Resolve API key
+        $key = trim($this->apiKey ?? '', " \t\n\r\0\x0B\"'");
+        if (empty($key)) {
+            $key = trim(config('mail.mailers.resend.key', '') ?? '', " \t\n\r\0\x0B\"'");
+        }
+        if (empty($key)) {
+            $key = trim(env('RESEND_KEY', env('MAIL_PASSWORD', '')) ?? '', " \t\n\r\0\x0B\"'");
         }
 
-        $response = Http::withToken($this->apiKey)
-            ->timeout(10)
-            ->post('https://api.resend.com/emails', array_filter($payload));
+        if (empty($key)) {
+            throw new \RuntimeException('Resend API key is missing. Set MAIL_PASSWORD or RESEND_KEY in your environment.');
+        }
+
+        $response = Http::withToken($key)
+            ->acceptJson()
+            ->timeout(15)
+            ->post('https://api.resend.com/emails', $payload);
 
         if ($response->failed()) {
-            throw new \RuntimeException('Resend API error: ' . $response->body());
+            $data = $response->json();
+            $errorMsg = $data['message'] ?? $response->body();
+            Log::error('Resend API request failed', [
+                'status' => $response->status(),
+                'response' => $errorMsg,
+                'payload' => array_merge($payload, ['html' => '[HTML content redacted]']),
+            ]);
+
+            throw new \RuntimeException("Resend error ({$response->status()}): {$errorMsg}");
         }
     }
 
@@ -52,4 +116,3 @@ class ResendHttpTransport extends AbstractTransport
         return 'resend-http';
     }
 }
-
