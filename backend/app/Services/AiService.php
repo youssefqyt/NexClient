@@ -110,148 +110,158 @@ class AiService
      */
     public function offlineChat(User $user, string $userMessage): string
     {
-        $q = strtolower(trim($userMessage));
-        $isClient = $user->role === 'client';
-        $client = $user->client;
+        try {
+            $q = strtolower(trim($userMessage));
+            $isClient = $user->role === 'client';
+            $client = $user->client;
 
-        // 1. PAYMENT & HOW TO PAY
-        if (str_contains($q, 'pay') || str_contains($q, 'bank') || str_contains($q, 'settle') || str_contains($q, 'method') || str_contains($q, 'wire')) {
-            $response = "### 💳 How to Pay in NexClient\n\n";
-            $response .= "Here is how payments work in the portal:\n\n";
-            $response .= "1. **View & Download Invoice**: Go to **Invoices** in the left sidebar and click **PDF** to download your official invoice with full itemization.\n";
-            $response .= "2. **Make Payment**: Payments are made externally (e.g., via **Bank Wire / Transfer**, **PayPal**, or direct credit card) using the account details specified in the **Notes & Terms** on the invoice.\n";
-            $response .= "3. **Staff Confirmation**: Once payment is completed, staff records the payment under the invoice. When the balance reaches zero, the invoice status changes to **Paid**.\n\n";
+            // 1. PAYMENT & HOW TO PAY
+            if (str_contains($q, 'pay') || str_contains($q, 'bank') || str_contains($q, 'settle') || str_contains($q, 'method') || str_contains($q, 'wire')) {
+                $response = "### 💳 How to Pay in NexClient\n\n";
+                $response .= "Here is how payments work in the portal:\n\n";
+                $response .= "1. **View & Download Invoice**: Go to **Invoices** in the left sidebar and click **PDF** to download your official invoice with full itemization.\n";
+                $response .= "2. **Make Payment**: Payments are made externally (e.g., via **Bank Wire / Transfer**, **PayPal**, or direct credit card) using the account details specified in the **Notes & Terms** on the invoice.\n";
+                $response .= "3. **Staff Confirmation**: Once payment is completed, staff records the payment under the invoice. When the balance reaches zero, the invoice status changes to **Paid**.\n\n";
 
-            if ($isClient && $client) {
-                $unpaidInvoices = Invoice::where('client_id', $client->id)
-                    ->whereIn('status', ['sent', 'overdue', 'draft'])
-                    ->with('payments')
-                    ->get();
+                if ($isClient && $client) {
+                    $unpaidInvoices = Invoice::where('client_id', $client->id)
+                        ->whereIn('status', ['sent', 'overdue', 'draft'])
+                        ->with('payments')
+                        ->get();
 
-                if ($unpaidInvoices->isNotEmpty()) {
-                    $response .= "#### Your Outstanding Invoices:\n";
-                    foreach ($unpaidInvoices as $inv) {
+                    if ($unpaidInvoices->isNotEmpty()) {
+                        $response .= "#### Your Outstanding Invoices:\n";
+                        foreach ($unpaidInvoices as $inv) {
+                            $paid = $inv->payments->sum('amount');
+                            $balance = max(0, (float)$inv->total - (float)$paid);
+                            $due = optional($inv->due_date)->format('M d, Y') ?? 'N/A';
+                            $response .= "- **{$inv->invoice_number}**: Balance **{$inv->currency} " . number_format($balance, 2) . "** (Total: {$inv->currency} {$inv->total}, Due: {$due}, Status: *{$inv->status}*)\n";
+                        }
+                    } else {
+                        $response .= "✅ You have no outstanding invoices. All bills are settled!";
+                    }
+                }
+
+                return $response;
+            }
+
+            // 2. INVOICES & BILLING
+            if (str_contains($q, 'invoice') || str_contains($q, 'bill') || str_contains($q, 'balance') || str_contains($q, 'due') || str_contains($q, 'fee') || str_contains($q, 'cost')) {
+                if ($isClient && $client) {
+                    $invoices = Invoice::where('client_id', $client->id)->with('payments')->latest()->take(10)->get();
+                    if ($invoices->isEmpty()) {
+                        return "You currently do not have any invoices on record.";
+                    }
+
+                    $out = "### 🧾 Your Invoices\n\n";
+                    foreach ($invoices as $inv) {
                         $paid = $inv->payments->sum('amount');
                         $balance = max(0, (float)$inv->total - (float)$paid);
                         $due = optional($inv->due_date)->format('M d, Y') ?? 'N/A';
-                        $response .= "- **{$inv->invoice_number}**: Balance **{$inv->currency} " . number_format($balance, 2) . "** (Total: {$inv->currency} {$inv->total}, Due: {$due}, Status: *{$inv->status}*)\n";
+                        $statusBadge = $balance <= 0 ? '✅ Paid' : "⏳ {$inv->status}";
+                        $out .= "- **{$inv->invoice_number}**: {$inv->currency} " . number_format((float)$inv->total, 2) . " | Balance Due: **{$inv->currency} " . number_format($balance, 2) . "** | Due: {$due} | {$statusBadge}\n";
                     }
+                    return $out;
                 } else {
-                    $response .= "✅ You have no outstanding invoices. All bills are settled!";
+                    $invoices = Invoice::with(['client', 'payments'])->latest()->take(8)->get();
+                    $unpaidCount = Invoice::whereIn('status', ['sent', 'overdue'])->count();
+                    $unpaidSum = Invoice::whereIn('status', ['sent', 'overdue'])->sum('total');
+
+                    $out = "### 🧾 Agency Invoice Overview\n\n";
+                    $out .= "- **Unpaid/Overdue**: {$unpaidCount} invoices (approx. USD " . number_format((float)$unpaidSum, 2) . ")\n\n";
+                    $out .= "#### Recent Invoices:\n";
+                    foreach ($invoices as $inv) {
+                        $cName = $inv->client ? ($inv->client->first_name . ' ' . $inv->client->last_name) : 'Unknown';
+                        $paid = $inv->payments->sum('amount');
+                        $balance = max(0, (float)$inv->total - (float)$paid);
+                        $out .= "- **{$inv->invoice_number}** ({$cName}): {$inv->currency} {$inv->total} | Balance: **{$inv->currency} " . number_format($balance, 2) . "** | Status: *{$inv->status}*\n";
+                    }
+                    return $out;
                 }
             }
 
-            return $response;
+            // 3. PROJECTS
+            if (str_contains($q, 'project') || str_contains($q, 'progress') || str_contains($q, 'deadline')) {
+                if ($isClient && $client) {
+                    $projects = Project::where('client_id', $client->id)->get();
+                    if ($projects->isEmpty()) {
+                        return "You do not have any active projects linked to your account at this moment.";
+                    }
+
+                    $out = "### 📁 Your Projects\n\n";
+                    foreach ($projects as $p) {
+                        $due = optional($p->deadline)->format('M d, Y') ?? 'TBD';
+                        $out .= "- **{$p->title}**: Status: **" . ucfirst($p->status) . "** | Progress: **{$p->progress}%** | Deadline: {$due} | Budget: {$p->currency} " . number_format((float)$p->budget, 2) . "\n";
+                    }
+                    return $out;
+                } else {
+                    $projects = Project::with('client')->latest()->take(8)->get();
+                    $out = "### 📁 Active Projects Overview\n\n";
+                    foreach ($projects as $p) {
+                        $cName = $p->client ? ($p->client->first_name . ' ' . $p->client->last_name) : 'No client';
+                        $due = optional($p->deadline)->format('M d, Y') ?? 'TBD';
+                        $out .= "- **{$p->title}** ({$cName}): **{$p->progress}%** complete | Status: *{$p->status}* | Deadline: {$due}\n";
+                    }
+                    return $out;
+                }
+            }
+
+            // 4. TASKS & TODOS
+            if (str_contains($q, 'task') || str_contains($q, 'todo') || str_contains($q, 'done') || str_contains($q, 'overdue')) {
+                if ($isClient && $client) {
+                    $pIds = Project::where('client_id', $client->id)->pluck('id');
+                    $tasks = Task::whereIn('project_id', $pIds)->orderBy('due_date')->take(15)->get();
+                    if ($tasks->isEmpty()) {
+                        return "No tasks found for your projects.";
+                    }
+
+                    $out = "### 📋 Project Tasks\n\n";
+                    foreach ($tasks as $t) {
+                        $due = optional($t->due_date)->format('M d, Y') ?? 'No date';
+                        $out .= "- [{$t->status}] **{$t->title}** | Priority: {$t->priority} | Due: {$due}\n";
+                    }
+                    return $out;
+                } else {
+                    $tasks = Task::with('project')->where('status', '!=', 'done')->orderBy('due_date')->take(12)->get();
+                    $out = "### 📋 Pending & Overdue Tasks\n\n";
+                    foreach ($tasks as $t) {
+                        $pTitle = $t->project?->title ?? 'General';
+                        $due = optional($t->due_date)->format('M d, Y') ?? 'No date';
+                        $out .= "- **{$t->title}** ({$pTitle}) | Status: *{$t->status}* | Priority: {$t->priority} | Due: {$due}\n";
+                    }
+                    return $out;
+                }
+            }
+
+            // 5. SUPPORT TICKETS
+            if (str_contains($q, 'ticket') || str_contains($q, 'support') || str_contains($q, 'help') || str_contains($q, 'issue')) {
+                $tickets = $isClient
+                    ? SupportTicket::where('client_id', $user->id)->latest()->take(6)->get()
+                    : SupportTicket::with('client')->latest()->take(6)->get();
+
+                if ($tickets->isEmpty()) {
+                    return "There are no support tickets on file. You can open a new ticket anytime via the **Support** menu in the sidebar.";
+                }
+
+                $out = "### 🎫 Support Tickets\n\n";
+                foreach ($tickets as $t) {
+                    $date = optional($t->created_at)->format('M d, Y');
+                    $out .= "- **#{$t->ticket_number}**: '{$t->subject}' | Status: **{$t->status}** | Priority: {$t->priority} | Date: {$date}\n";
+                }
+                return $out;
+            }
+
+            // 6. DEFAULT WORKSPACE OVERVIEW
+            return $this->offlineWorkspaceDigest($user);
+        } catch (\Throwable $e) {
+            Log::warning('Offline AI error querying database: ' . $e->getMessage());
+            return "I am operating in **Workspace Mode**.\n\n"
+                . "You can ask me about:\n"
+                . "- **How to pay**: instructions for paying invoices.\n"
+                . "- **Projects**: track status, deadlines, and progress.\n"
+                . "- **Invoices**: check billing and remaining balances.\n"
+                . "- **Tasks**: view upcoming deliverables.";
         }
-
-        // 2. INVOICES & BILLING
-        if (str_contains($q, 'invoice') || str_contains($q, 'bill') || str_contains($q, 'balance') || str_contains($q, 'due') || str_contains($q, 'fee') || str_contains($q, 'cost')) {
-            if ($isClient && $client) {
-                $invoices = Invoice::where('client_id', $client->id)->with('payments')->latest()->take(10)->get();
-                if ($invoices->isEmpty()) {
-                    return "You currently do not have any invoices on record.";
-                }
-
-                $out = "### 🧾 Your Invoices\n\n";
-                foreach ($invoices as $inv) {
-                    $paid = $inv->payments->sum('amount');
-                    $balance = max(0, (float)$inv->total - (float)$paid);
-                    $due = optional($inv->due_date)->format('M d, Y') ?? 'N/A';
-                    $statusBadge = $balance <= 0 ? '✅ Paid' : "⏳ {$inv->status}";
-                    $out .= "- **{$inv->invoice_number}**: {$inv->currency} " . number_format((float)$inv->total, 2) . " | Balance Due: **{$inv->currency} " . number_format($balance, 2) . "** | Due: {$due} | {$statusBadge}\n";
-                }
-                return $out;
-            } else {
-                $invoices = Invoice::with(['client', 'payments'])->latest()->take(8)->get();
-                $unpaidCount = Invoice::whereIn('status', ['sent', 'overdue'])->count();
-                $unpaidSum = Invoice::whereIn('status', ['sent', 'overdue'])->sum('total');
-
-                $out = "### 🧾 Agency Invoice Overview\n\n";
-                $out .= "- **Unpaid/Overdue**: {$unpaidCount} invoices (approx. USD " . number_format((float)$unpaidSum, 2) . ")\n\n";
-                $out .= "#### Recent Invoices:\n";
-                foreach ($invoices as $inv) {
-                    $cName = $inv->client ? ($inv->client->first_name . ' ' . $inv->client->last_name) : 'Unknown';
-                    $paid = $inv->payments->sum('amount');
-                    $balance = max(0, (float)$inv->total - (float)$paid);
-                    $out .= "- **{$inv->invoice_number}** ({$cName}): {$inv->currency} {$inv->total} | Balance: **{$inv->currency} " . number_format($balance, 2) . "** | Status: *{$inv->status}*\n";
-                }
-                return $out;
-            }
-        }
-
-        // 3. PROJECTS
-        if (str_contains($q, 'project') || str_contains($q, 'progress') || str_contains($q, 'deadline')) {
-            if ($isClient && $client) {
-                $projects = Project::where('client_id', $client->id)->get();
-                if ($projects->isEmpty()) {
-                    return "You do not have any active projects linked to your account at this moment.";
-                }
-
-                $out = "### 📁 Your Projects\n\n";
-                foreach ($projects as $p) {
-                    $due = optional($p->deadline)->format('M d, Y') ?? 'TBD';
-                    $out .= "- **{$p->title}**: Status: **" . ucfirst($p->status) . "** | Progress: **{$p->progress}%** | Deadline: {$due} | Budget: {$p->currency} " . number_format((float)$p->budget, 2) . "\n";
-                }
-                return $out;
-            } else {
-                $projects = Project::with('client')->latest()->take(8)->get();
-                $out = "### 📁 Active Projects Overview\n\n";
-                foreach ($projects as $p) {
-                    $cName = $p->client ? ($p->client->first_name . ' ' . $p->client->last_name) : 'No client';
-                    $due = optional($p->deadline)->format('M d, Y') ?? 'TBD';
-                    $out .= "- **{$p->title}** ({$cName}): **{$p->progress}%** complete | Status: *{$p->status}* | Deadline: {$due}\n";
-                }
-                return $out;
-            }
-        }
-
-        // 4. TASKS & TODOS
-        if (str_contains($q, 'task') || str_contains($q, 'todo') || str_contains($q, 'done') || str_contains($q, 'overdue')) {
-            if ($isClient && $client) {
-                $pIds = Project::where('client_id', $client->id)->pluck('id');
-                $tasks = Task::whereIn('project_id', $pIds)->orderBy('due_date')->take(15)->get();
-                if ($tasks->isEmpty()) {
-                    return "No tasks found for your projects.";
-                }
-
-                $out = "### 📋 Project Tasks\n\n";
-                foreach ($tasks as $t) {
-                    $due = optional($t->due_date)->format('M d, Y') ?? 'No date';
-                    $out .= "- [{$t->status}] **{$t->title}** | Priority: {$t->priority} | Due: {$due}\n";
-                }
-                return $out;
-            } else {
-                $tasks = Task::with('project')->where('status', '!=', 'done')->orderBy('due_date')->take(12)->get();
-                $out = "### 📋 Pending & Overdue Tasks\n\n";
-                foreach ($tasks as $t) {
-                    $pTitle = $t->project?->title ?? 'General';
-                    $due = optional($t->due_date)->format('M d, Y') ?? 'No date';
-                    $out .= "- **{$t->title}** ({$pTitle}) | Status: *{$t->status}* | Priority: {$t->priority} | Due: {$due}\n";
-                }
-                return $out;
-            }
-        }
-
-        // 5. SUPPORT TICKETS
-        if (str_contains($q, 'ticket') || str_contains($q, 'support') || str_contains($q, 'help') || str_contains($q, 'issue')) {
-            $tickets = $isClient
-                ? SupportTicket::where('client_id', $user->id)->latest()->take(6)->get()
-                : SupportTicket::with('client')->latest()->take(6)->get();
-
-            if ($tickets->isEmpty()) {
-                return "There are no support tickets on file. You can open a new ticket anytime via the **Support** menu in the sidebar.";
-            }
-
-            $out = "### 🎫 Support Tickets\n\n";
-            foreach ($tickets as $t) {
-                $date = optional($t->created_at)->format('M d, Y');
-                $out .= "- **#{$t->ticket_number}**: '{$t->subject}' | Status: **{$t->status}** | Priority: {$t->priority} | Date: {$date}\n";
-            }
-            return $out;
-        }
-
-        // 6. DEFAULT WORKSPACE OVERVIEW
-        return $this->offlineWorkspaceDigest($user);
     }
 
     /**
